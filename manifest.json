@@ -2,7 +2,7 @@
   "name": "Routine Coach",
   "short_name": "Routines",
   "description": "Ton coach de routines personnel",
-  "start_url": "/index.html",
+  "start_url": "/Routines-coach",
   "display": "standalone",
   "background_color": "#0f1117",
   "theme_color": "#6d28d9",
