@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="theme-color" content="#6d28d9"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Routines"/>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="icon" href="icon-192.png"/>
+  <title>Routine Coach</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body { background: #0f1117; font-family: 'DM Sans', sans-serif; color: #e8e8f0; overscroll-behavior: none; }
+    input, button, textarea { font-family: inherit; }
+    ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #353850; border-radius: 4px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const STORAGE_KEY = "routine-coach-v2";
+
+const BASE_PROMPT = `Tu es un coach de routines expert pour Sébastien, responsable marketing produit chez Bouygues Telecom. Il manage une équipe de 5 personnes, a un agenda de manager très variable, et ses principaux défis sont : maintenir ses routines dans la durée (maintenance), passer à l'action (exécution), et gérer un contexte chaotique.
+
+Tes principes de coaching :
+1. Les routines doivent être ancrées sur des DÉCLENCHEURS (événements fixes), pas des horaires rigides
+2. Règle du "jamais deux fois de suite" : une routine ratée c'est OK, deux fois c'est le signal de reprendre
+3. Taille réduite : mieux vaut 10-15 min efficaces que 1h jamais faite
+4. Distinguer routines PRO QUOTIDIENNES (priorités, focus, réunions) et DÉVELOPPEMENT PERSO (lecture, montée en compétences, recul)
+
+Quand Sébastien veut créer une routine, réponds UNIQUEMENT avec ce JSON exact (sans texte avant/après) quand tu as toutes les infos :
+{"action": "create_routine", "routine": {"name": "...", "trigger": "...", "duration": "...", "category": "pro|dev", "description": "..."}}
+
+Pour les autres échanges, réponds en français, de façon concise et directe. Sois chaleureux mais efficace.
+Si Sébastien demande à voir ses routines, réponds avec exactement : {"action": "show_routines"}
+Ne jamais renvoyer du JSON de création sans le déclencheur ET la durée.`;
+
+function buildSystemPrompt(data) {
+  const today = todayKey();
+  const last7 = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    return d.toISOString().split("T")[0];
+  });
+  let ctx = BASE_PROMPT;
+  if (data.routines.length > 0) {
+    ctx += "\n\n--- ÉTAT ACTUEL ---";
+    ctx += `\nDate : ${today}`;
+    ctx += `\nRoutines (${data.routines.length}) :`;
+    data.routines.forEach(r => {
+      const stats = last7.map(d => {
+        const v = data.logs[d]?.[r.id];
+        return v === true ? "✓" : v === false ? "✗" : "–";
+      }).reverse().join(" ");
+      const done = last7.filter(d => data.logs[d]?.[r.id] === true).length;
+      const logged = last7.filter(d => data.logs[d]?.[r.id] !== undefined).length;
+      const rate = logged > 0 ? Math.round(done / logged * 100) : null;
+      ctx += `\n- "${r.name}" | ${r.trigger} | ${r.duration} | ${r.category}`;
+      ctx += `\n  7j: ${stats}${rate !== null ? ` | ${rate}%` : ""}`;
+    });
+    const todayDone = data.routines.filter(r => data.logs[today]?.[r.id] === true).length;
+    ctx += `\nAujourd'hui : ${todayDone}/${data.routines.length} faites.`;
+  }
+  return ctx;
+}
+
+function loadData() {
+  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch {}
+  return { routines: [], logs: {}, messages: [], apiKey: "" };
+}
+function saveData(d) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {} }
+function todayKey() { return new Date().toISOString().split("T")[0]; }
+
+function getStreak(logs, id) {
+  let s = 0, d = new Date(); d.setDate(d.getDate() - 1);
+  while (true) {
+    const k = d.toISOString().split("T")[0];
+    if (logs[k]?.[id] === true) { s++; d.setDate(d.getDate() - 1); } else break;
+  }
+  return s;
+}
+function getMissedYesterday(logs, id) {
+  const y = new Date(); y.setDate(y.getDate() - 1);
+  return logs[y.toISOString().split("T")[0]]?.[id] === false;
+}
+
+const CAT = { pro: { accent: "#4a9eff", label: "Pro" }, dev: { accent: "#4ade80", label: "Dev" } };
+
+function renderText(text) {
+  return text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g).map((p, i) => {
+    if (p.startsWith("**") && p.endsWith("**")) return <strong key={i}>{p.slice(2,-2)}</strong>;
+    if (p.startsWith("*") && p.endsWith("*")) return <em key={i}>{p.slice(1,-1)}</em>;
+    return p;
+  });
+}
+
+function ApiKeySetup({ onSave }) {
+  const [key, setKey] = useState("");
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32,background:"#0f1117"}}>
+      <div style={{fontSize:48,marginBottom:16}}>🎯</div>
+      <h1 style={{fontSize:22,fontWeight:700,color:"#f0f0ff",marginBottom:8,textAlign:"center"}}>Routine Coach</h1>
+      <p style={{fontSize:14,color:"#666880",textAlign:"center",marginBottom:32,lineHeight:1.6}}>
+        Pour fonctionner, l'app a besoin de ta clé API Anthropic.<br/>
+        Elle est stockée uniquement sur ton téléphone.
+      </p>
+      <div style={{width:"100%",maxWidth:360}}>
+        <p style={{fontSize:12,color:"#888aaa",marginBottom:8}}>Comment l'obtenir :</p>
+        <ol style={{fontSize:12,color:"#666880",paddingLeft:16,marginBottom:20,lineHeight:1.8}}>
+          <li>Va sur <strong style={{color:"#a78bfa"}}>console.anthropic.com</strong></li>
+          <li>Connecte-toi / crée un compte</li>
+          <li>Menu → <em>API Keys</em> → <em>Create Key</em></li>
+          <li>Copie la clé et colle-la ici</li>
+        </ol>
+        <input
+          value={key}
+          onChange={e => setKey(e.target.value)}
+          placeholder="sk-ant-api03-..."
+          style={{width:"100%",background:"#252838",border:"1px solid #353850",borderRadius:10,padding:"12px 14px",color:"#e8e8f0",fontSize:13,outline:"none",marginBottom:12}}
+        />
+        <button
+          onClick={() => key.trim().startsWith("sk-") && onSave(key.trim())}
+          disabled={!key.trim().startsWith("sk-")}
+          style={{width:"100%",background: key.trim().startsWith("sk-") ? "#6d28d9":"#2a2840",border:"none",borderRadius:10,padding:"13px",color:"#fff",fontWeight:700,fontSize:15,cursor: key.trim().startsWith("sk-") ? "pointer":"default",transition:"background 0.15s"}}
+        >
+          Démarrer →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState("coach");
+  const [data, setData] = useState(loadData);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => { saveData(data); }, [data]);
+  useEffect(() => {
+    if (tab === "coach") setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+  }, [data.messages, tab]);
+
+  if (!data.apiKey) {
+    return <ApiKeySetup onSave={key => setData(d => ({ ...d, apiKey: key }))} />;
+  }
+
+  const sendMessage = async (text) => {
+    if (!text.trim() || loading) return;
+    const userMsg = { role: "user", content: text, ts: Date.now() };
+    const newMsgs = [...data.messages, userMsg];
+    setData(d => ({ ...d, messages: newMsgs }));
+    setInput(""); setLoading(true);
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": data.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          system: buildSystemPrompt(data),
+          messages: newMsgs.map(m => ({ role: m.role, content: m.content }))
+        })
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error.message);
+      const raw = result.content?.[0]?.text || "Erreur.";
+      let action = null;
+      try { action = JSON.parse(raw.trim()); } catch {}
+
+      if (action?.action === "create_routine") {
+        const nr = { id: Date.now().toString(), ...action.routine, createdAt: todayKey() };
+        setData(d => ({
+          ...d,
+          routines: [...d.routines, nr],
+          messages: [...d.messages, userMsg, { role:"assistant", content:`✅ Routine **${nr.name}** créée ! Déclencheur : *${nr.trigger}* — ${nr.duration}.\nRetrouve-la dans l'onglet Routines.`, ts: Date.now() }]
+        }));
+      } else if (action?.action === "show_routines") {
+        setData(d => ({
+          ...d,
+          messages: [...d.messages, userMsg, {
+            role:"assistant",
+            content: d.routines.length === 0 ? "Pas encore de routines. Dis-moi ce que tu veux mettre en place !" : `Tu as **${d.routines.length} routine(s)**. Consulte l'onglet Routines pour les cocher.`,
+            ts: Date.now()
+          }]
+        }));
+      } else {
+        setData(d => ({ ...d, messages: [...d.messages, userMsg, { role:"assistant", content:raw, ts:Date.now() }] }));
+      }
+    } catch(err) {
+      setData(d => ({ ...d, messages: [...d.messages, userMsg, { role:"assistant", content:`Erreur : ${err.message}`, ts:Date.now() }] }));
+    }
+    setLoading(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  };
+
+  const toggleRoutine = (id, done) => {
+    const today = todayKey();
+    setData(d => ({ ...d, logs: { ...d.logs, [today]: { ...(d.logs[today]||{}), [id]: done } } }));
+  };
+  const deleteRoutine = (id) => setData(d => ({ ...d, routines: d.routines.filter(r => r.id !== id) }));
+
+  const today = todayKey();
+  const todayLogs = data.logs[today] || {};
+  const completedToday = data.routines.filter(r => todayLogs[r.id] === true).length;
+
+  const S = {
+    app: { fontFamily:"'DM Sans',sans-serif", background:"#0f1117", color:"#e8e8f0", height:"100dvh", display:"flex", flexDirection:"column", maxWidth:540, margin:"0 auto" },
+    header: { padding:"env(safe-area-inset-top,16px) 20px 0", borderBottom:"1px solid #1e2030", background:"#0f1117" },
+    title: { fontSize:20, fontWeight:700, color:"#f0f0ff", letterSpacing:"-0.5px" },
+    sub: { fontSize:12, color:"#555870", marginTop:2, marginBottom:14 },
+    tabs: { display:"flex", gap:4 },
+    tab: a => ({ padding:"8px 16px", borderRadius:"8px 8px 0 0", border:"none", cursor:"pointer", fontSize:14, fontWeight:600, background: a?"#1a1d2e":"transparent", color: a?"#a78bfa":"#555870" }),
+    body: { flex:1, display:"flex", flexDirection:"column", background:"#1a1d2e", overflow:"hidden" },
+    msgs: { flex:1, overflowY:"auto", padding:"16px 20px", display:"flex", flexDirection:"column", gap:10 },
+    bubble: r => ({ maxWidth:"84%", alignSelf: r==="user"?"flex-end":"flex-start", background: r==="user"?"#312e81":"#252838", borderRadius: r==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px", padding:"10px 14px", fontSize:14, lineHeight:1.55, color: r==="user"?"#c7d2fe":"#d8d8f0", whiteSpace:"pre-wrap" }),
+    chatBottom: { padding:"12px 16px", borderTop:"1px solid #252838", background:"#1a1d2e", paddingBottom:"env(safe-area-inset-bottom,12px)" },
+    inputRow: { display:"flex", gap:8 },
+    inp: { flex:1, background:"#252838", border:"1px solid #353850", borderRadius:10, padding:"10px 13px", color:"#e8e8f0", fontSize:14, outline:"none" },
+    sendBtn: { background:"#6d28d9", border:"none", borderRadius:10, padding:"10px 16px", color:"#fff", fontWeight:700, cursor:"pointer", fontSize:16 },
+    rBody: { flex:1, overflowY:"auto", padding:"16px 20px", paddingBottom:"env(safe-area-inset-bottom,16px)" },
+    pBar: { height:5, background:"#252838", borderRadius:99, marginBottom:20, overflow:"hidden" },
+    pFill: w => ({ height:"100%", background:"linear-gradient(90deg,#6d28d9,#a78bfa)", borderRadius:99, width:`${w}%`, transition:"width 0.4s" }),
+    card: (done, missed) => ({ background: done?"#1a2a1a":missed?"#2a1a1a":"#252838", border:`1px solid ${done?"#2d5a2d":missed?"#5a2d2d":"#353850"}`, borderRadius:12, padding:"13px 14px", marginBottom:10, display:"flex", alignItems:"flex-start", gap:10, transition:"all 0.2s" }),
+    check: done => ({ width:26, height:26, borderRadius:"50%", border:`2px solid ${done?"#4ade80":"#444660"}`, background: done?"#4ade80":"transparent", cursor:"pointer", flexShrink:0, marginTop:2, display:"flex", alignItems:"center", justifyContent:"center" }),
+    badge: c => ({ background:c+"22", color:c, borderRadius:6, padding:"1px 7px", fontWeight:600, fontSize:11 }),
+    empty: { textAlign:"center", color:"#555870", padding:"48px 0" },
+    del: { marginLeft:"auto", background:"none", border:"none", color:"#444660", cursor:"pointer", fontSize:18, flexShrink:0, padding:"0 2px" }
+  };
+
+  return (
+    <div style={S.app}>
+      <div style={S.header}>
+        <p style={S.title}>🎯 Routine Coach</p>
+        <p style={S.sub}>Construit avec toi, pour durer</p>
+        <div style={S.tabs}>
+          <button style={S.tab(tab==="coach")} onClick={()=>setTab("coach")}>Coach IA</button>
+          <button style={S.tab(tab==="routines")} onClick={()=>setTab("routines")}>
+            Mes routines {data.routines.length > 0 && `(${data.routines.length})`}
+          </button>
+        </div>
+      </div>
+
+      <div style={S.body}>
+        {tab === "coach" && <>
+          <div style={S.msgs}>
+            {data.messages.length === 0 && (
+              <div style={{color:"#555870",fontSize:14,textAlign:"center",padding:"32px 0"}}>
+                <div style={{fontSize:36,marginBottom:12}}>👋</div>
+                <div>Dis-moi quelle routine tu veux mettre en place.</div>
+              </div>
+            )}
+            {data.messages.map((m,i) => (
+              <div key={i} style={S.bubble(m.role)}>{renderText(m.content)}</div>
+            ))}
+            {loading && <div style={S.bubble("assistant")}><span style={{opacity:0.5}}>…</span></div>}
+            <div ref={endRef}/>
+          </div>
+          <div style={S.chatBottom}>
+            <div style={S.inputRow}>
+              <input ref={inputRef} style={S.inp} value={input} onChange={e=>setInput(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&sendMessage(input)}
+                placeholder="Décris une routine à mettre en place…" disabled={loading}/>
+              <button style={S.sendBtn} onClick={()=>sendMessage(input)} disabled={loading||!input.trim()}>→</button>
+            </div>
+            {data.messages.length > 0 && (
+              <div style={{textAlign:"center",marginTop:8}}>
+                <button onClick={()=>setData(d=>({...d,messages:[]}))} style={{background:"none",border:"none",color:"#444660",fontSize:11,cursor:"pointer"}}>
+                  Effacer la conversation
+                </button>
+              </div>
+            )}
+          </div>
+        </>}
+
+        {tab === "routines" && (
+          <div style={S.rBody}>
+            {data.routines.length > 0 && <>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontSize:13,color:"#666880"}}>
+                  Aujourd'hui : <strong style={{color:"#a78bfa"}}>{completedToday}/{data.routines.length}</strong>
+                </span>
+                <span style={{fontSize:12,color:"#555870"}}>
+                  {new Date().toLocaleDateString("fr-FR",{weekday:"short",day:"numeric",month:"short"})}
+                </span>
+              </div>
+              <div style={S.pBar}><div style={S.pFill(data.routines.length ? completedToday/data.routines.length*100 : 0)}/></div>
+            </>}
+
+            {data.routines.length === 0 ? (
+              <div style={S.empty}>
+                <div style={{fontSize:36,marginBottom:12}}>🌱</div>
+                <div>Pas encore de routines.</div>
+                <div style={{marginTop:6,fontSize:13}}>Va dans <strong>Coach IA</strong> pour en créer.</div>
+              </div>
+            ) : data.routines.map(r => {
+              const done = todayLogs[r.id] === true;
+              const missed = !done && getMissedYesterday(data.logs, r.id);
+              const streak = getStreak(data.logs, r.id);
+              const cat = CAT[r.category] || CAT.pro;
+              return (
+                <div key={r.id} style={S.card(done, missed)}>
+                  <button style={S.check(done)} onClick={()=>toggleRoutine(r.id,!done)}>
+                    {done && <span style={{color:"#0f1117",fontSize:13,fontWeight:900}}>✓</span>}
+                  </button>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:600,fontSize:15,color:"#e8e8f0",marginBottom:2}}>{r.name}</div>
+                    <div style={{fontSize:12,color:"#666880",display:"flex",gap:8,flexWrap:"wrap"}}>
+                      <span>⚡ {r.trigger}</span><span>⏱ {r.duration}</span>
+                    </div>
+                    {r.description && <div style={{fontSize:12,color:"#888aaa",marginTop:3}}>{r.description}</div>}
+                    <div style={{display:"flex",gap:5,marginTop:7,flexWrap:"wrap"}}>
+                      <span style={S.badge(cat.accent)}>{cat.label}</span>
+                      {streak > 0 && <span style={S.badge("#f59e0b")}>🔥 {streak}j</span>}
+                      {missed && !done && <span style={S.badge("#f87171")}>⚠ Hier manqué</span>}
+                      {done && <span style={S.badge("#4ade80")}>✓ Fait</span>}
+                    </div>
+                  </div>
+                  <button style={S.del} onClick={()=>deleteRoutine(r.id)}>×</button>
+                </div>
+              );
+            })}
+
+            <div style={{textAlign:"center",marginTop:16}}>
+              <button onClick={()=>setData(d=>({...d,apiKey:""}))} style={{background:"none",border:"none",color:"#333550",fontSize:11,cursor:"pointer"}}>
+                Changer de clé API
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js"));
+}
+</script>
+</body>
+</html>
