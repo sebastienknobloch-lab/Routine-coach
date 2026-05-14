@@ -72,7 +72,21 @@ function buildSystemPrompt(data) {
 }
 
 function loadData() {
-  try { const r=localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch {}
+  try {
+    const r = localStorage.getItem("routine-coach-v3")
+           || localStorage.getItem("routine-coach-v2")
+           || localStorage.getItem("routine-coach-v1");
+    if (r) {
+      const p = JSON.parse(r);
+      return {
+        routines: p.routines || [],
+        logs: p.logs || {},
+        messages: p.messages || [],
+        apiKey: p.apiKey || "",
+        todos: p.todos || { daily:{}, weekly:{} }
+      };
+    }
+  } catch {}
   return { routines:[], logs:{}, messages:[], apiKey:"", todos:{ daily:{}, weekly:{} } };
 }
 function saveData(d) { try { localStorage.setItem(STORAGE_KEY,JSON.stringify(d)); } catch {} }
