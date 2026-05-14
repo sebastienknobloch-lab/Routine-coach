@@ -1,4 +1,4 @@
-s<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8"/>
@@ -274,7 +274,10 @@ function App() {
       if(result.error) throw new Error(result.error.message);
       const raw=result.content?.[0]?.text||"Erreur.";
       let action=null;
-      try{action=JSON.parse(raw.trim());}catch{}
+      try{
+        const clean=raw.trim().replace(/^```json\s*/,"").replace(/\s*```$/,"").trim();
+         action=JSON.parse(clean);
+      } catch{}
       if(action?.action==="create_routine"){
         const nr={id:Date.now().toString(),...action.routine,createdAt:todayKey()};
         setData(d=>({...d,routines:[...d.routines,nr],messages:[...d.messages,userMsg,{role:"assistant",content:`✅ Routine **${nr.name}** créée ! Déclencheur : *${nr.trigger}* — ${nr.duration}.\nRetrouve-la dans l'onglet Routines.`,ts:Date.now()}]}));
